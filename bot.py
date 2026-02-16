@@ -4,87 +4,196 @@ from discord.ext import commands
 import datetime
 import os
 from dotenv import load_dotenv
+from collections import defaultdict
 
 load_dotenv()
 
-intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
-
+intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# ─── TRACKERS ───
+join_tracker = defaultdict(list)
+channel_tracker = defaultdict(list)
+role_tracker = defaultdict(list)
+ban_tracker = defaultdict(list)
+
+RAID_THRESHOLD = 5      # joins in 10 seconds
+ACTION_THRESHOLD = 3    # actions in 10 seconds
+
+# ─── ON READY ───
 @bot.event
 async def on_ready():
     await bot.tree.sync()
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.watching,
-            name="MANDEM$ Server 👀"
+            name="🛡️ Protecting Server"
         )
     )
     print(f"✅ Online! Logged in as {bot.user}")
 
-# ─── WELCOME ───
+# ══════════════════════════════════════
+#           ANTI RAID
+# ══════════════════════════════════════
+
 @bot.event
 async def on_member_join(member: discord.Member):
-    channel = discord.utils.get(member.guild.text_channels, name="general")
-    if channel:
-        embed = discord.Embed(
-            title=f"Welcome sa {member.guild.name}! 🎉",
-            description=f"Kamusta {member.mention}!",
-            color=discord.Color.purple()
-        )
-        embed.set_thumbnail(url=member.avatar.url if member.avatar else None)
-        embed.add_field(name="👥 Members", value=member.guild.member_count)
-        await channel.send(embed=embed)
+    now = datetime.datetime.now().timestamp()
+    guild_id = member.guild.id
 
-# ─── MODERATION ───
-@bot.tree.command(name="kick", description="Kick ng member")
-@app_commands.checks.has_permissions(kick_members=True)
-async def kick(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason"):
-    await member.kick(reason=reason)
-    await interaction.response.send_message(f"✅ Na-kick si {member.mention} | {reason}")
+    join_tracker[guild_id] = [t for t in join_tracker[guild_id] if now - t < 10]
+    join_tracker[guild_id].append(now)
 
-@bot.tree.command(name="ban", description="Ban ng member")
-@app_commands.checks.has_permissions(ban_members=True)
-async def ban(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason"):
-    await member.ban(reason=reason)
-    await interaction.response.send_message(f"🔨 Na-ban si {member.mention} | {reason}")
+    # Kung 5+ joins in 10 seconds = RAID
+    if len(join_tracker[guild_id]) >= RAID_THRESHOLD:
+        try:
+            await member.kick(reason="⚠️ Anti-Raid Protection")
+        except:
+            pass
 
-@bot.tree.command(name="mute", description="Mute ng member")
-@app_commands.checks.has_permissions(moderate_members=True)
-async def mute(interaction: discord.Interaction, member: discord.Member, minutes: int = 10):
-    await member.timeout(datetime.timedelta(minutes=minutes))
-    await interaction.response.send_message(f"🔇 Na-mute si {member.mention} ng {minutes} mins!")
+        log_channel = discord.utils.get(member.guild.text_channels, name="mod-logs")
+        if log_channel:
+            embed = discord.Embed(
+                title="🚨 RAID DETECTED!",
+                description=f"Maraming users ang nag-join nang mabilis!\n{member.mention} ay na-kick!",
+                color=discord.Color.red()
+            )
+            embed.add_field(name="Joins", value=f"{len(join_tracker[guild_id])} in 10 seconds")
+            await log_channel.send(embed=embed)
 
-@bot.tree.command(name="clear", description="Mag-clear ng messages")
-@app_commands.checks.has_permissions(manage_messages=True)
-async def clear(interaction: discord.Interaction, amount: int = 5):
-    await interaction.channel.purge(limit=amount)
-    await interaction.response.send_message(f"🗑️ Na-clear ang {amount} messages!", ephemeral=True)
+# ══════════════════════════════════════
+#           ANTI NUKE
+# ══════════════════════════════════════
 
-# ─── FUN ───
-@bot.tree.command(name="coinflip", description="Mag-flip ng coin")
-async def coinflip(interaction: discord.Interaction):
-    import random
-    result = random.choice(["Heads 🪙", "Tails 🪙"])
-    await interaction.response.send_message(f"**{result}**!")
+# ─── Channel Delete Protection ───
+@bot.event
+async def on_guild_channel_delete(channel):
+    now = datetime.datetime.now().timestamp()
+    guild = channel.guild
 
-# ─── HELP ───
-@bot.tree.command(name="help", description="Lahat ng commands")
-async def help(interaction: discord.Interaction):
-    embed = discord.Embed(title="📖 MANDEM$ Commands", color=discord.Color.purple())
-    embed.add_field(name="⚔️ Mod", value="`/kick` `/ban` `/mute` `/clear`", inline=False)
-    embed.add_field(name="🎮 Fun", value="`/coinflip`", inline=False)
-    embed.set_footer(text="MANDEM$ Bot ❤️")
+    async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.channel_delete):
+        user = entry.user
+        if user.bot:
+            return
+
+        channel_tracker[user.id] = [t for t in channel_tracker[user.id] if now - t < 10]
+        channel_tracker[user.id].append(now)
+
+        if len(channel_tracker[user.id]) >= ACTION_THRESHOLD:
+            try:
+                await user.timeout(datetime.timedelta(hours=24), reason="Anti-Nuke: Mass Channel Delete")
+            except:
+                pass
+
+            log_channel = discord.utils.get(guild.text_channels, name="mod-logs")
+            if log_channel:
+                embed = discord.Embed(
+                    title="🚨 NUKE DETECTED!",
+                    description=f"{user.mention} ay nag-delete ng maraming channels!",
+                    color=discord.Color.red()
+                )
+                await log_channel.send(embed=embed)
+
+# ─── Role Delete Protection ───
+@bot.event
+async def on_guild_role_delete(role):
+    now = datetime.datetime.now().timestamp()
+    guild = role.guild
+
+    async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.role_delete):
+        user = entry.user
+        if user.bot:
+            return
+
+        role_tracker[user.id] = [t for t in role_tracker[user.id] if now - t < 10]
+        role_tracker[user.id].append(now)
+
+        if len(role_tracker[user.id]) >= ACTION_THRESHOLD:
+            try:
+                await user.timeout(datetime.timedelta(hours=24), reason="Anti-Nuke: Mass Role Delete")
+            except:
+                pass
+
+            log_channel = discord.utils.get(guild.text_channels, name="mod-logs")
+            if log_channel:
+                embed = discord.Embed(
+                    title="🚨 NUKE DETECTED!",
+                    description=f"{user.mention} ay nag-delete ng maraming roles!",
+                    color=discord.Color.red()
+                )
+                await log_channel.send(embed=embed)
+
+# ─── Mass Ban Protection ───
+@bot.event
+async def on_member_ban(guild, user):
+    now = datetime.datetime.now().timestamp()
+
+    async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.ban):
+        banner = entry.user
+        if banner.bot:
+            return
+
+        ban_tracker[banner.id] = [t for t in ban_tracker[banner.id] if now - t < 10]
+        ban_tracker[banner.id].append(now)
+
+        if len(ban_tracker[banner.id]) >= ACTION_THRESHOLD:
+            try:
+                await banner.timeout(datetime.timedelta(hours=24), reason="Anti-Nuke: Mass Ban")
+            except:
+                pass
+
+            log_channel = discord.utils.get(guild.text_channels, name="mod-logs")
+            if log_channel:
+                embed = discord.Embed(
+                    title="🚨 MASS BAN DETECTED!",
+                    description=f"{banner.mention} ay nag-ban ng maraming members!",
+                    color=discord.Color.red()
+                )
+                await log_channel.send(embed=embed)
+
+# ══════════════════════════════════════
+#           SLASH COMMANDS
+# ══════════════════════════════════════
+
+@bot.tree.command(name="antinuke", description="Anti-Nuke status")
+@app_commands.checks.has_permissions(administrator=True)
+async def antinuke(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🛡️ Anti-Nuke Status",
+        color=discord.Color.green()
+    )
+    embed.add_field(name="Mass Channel Delete", value="✅ Active", inline=False)
+    embed.add_field(name="Mass Role Delete", value="✅ Active", inline=False)
+    embed.add_field(name="Mass Ban", value="✅ Active", inline=False)
+    embed.add_field(name="Anti Raid", value="✅ Active", inline=False)
+    embed.set_footer(text="🛡️ Server is Protected!")
     await interaction.response.send_message(embed=embed)
 
-bot.run(os.getenv("TOKEN"))
+@bot.tree.command(name="antiraid", description="Anti-Raid status")
+@app_commands.checks.has_permissions(administrator=True)
+async def antiraid(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🚨 Anti-Raid Status",
+        description=f"Kick ang users kung **{RAID_THRESHOLD}+ joins** sa loob ng **10 seconds**",
+        color=discord.Color.green()
+    )
+    embed.add_field(name="Status", value="✅ Active")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="help", description="Lahat ng commands")
+async def help(interaction: discord.Interaction):
+    embed = discord.Embed(title="🛡️ Anti-Nuke & Anti-Raid Bot", color=discord.Color.purple())
+    embed.add_field(name="🛡️ Protection", value="`/antinuke` `/antiraid`", inline=False)
+    embed.add_field(name="📋 Logs", value="Pumunta sa **#mod-logs** channel", inline=False)
+    embed.set_footer(text="Bot is always watching 👀")
+    await interaction.response.send_message(embed=embed)
+
+bot.run(os.getenv("MTQ3MTY4MzM2OTMwMDM5NDA5NA.GvORDY.kKgdMaZXH1OwMURglimg8b_T-7W5C7Y3xNHFDg"))
 ```
 
 ---
 
-**Requirements.txt:**
+**requirements.txt:**
 ```
 discord.py
 python-dotenv
